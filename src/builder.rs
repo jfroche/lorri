@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use NixFile;
+use {NixFile, StorePath};
 
 fn instrumented_build(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info, Error> {
     // We're looking for log lines matching:
@@ -52,9 +52,9 @@ fn instrumented_build(root_nix_file: &NixFile, cas: &ContentAddressable) -> Resu
     let stderr_results =
         ::nix::parse_nix_output(&output.stderr, |line| parse_evaluation_line(line));
 
-    let produced_drvs = ::nix::parse_nix_output(&output.stdout, PathBuf::from);
+    let produced_drvs = ::nix::parse_nix_output(&output.stdout, StorePath::from);
 
-    let (paths, named_drvs, log_lines): (Vec<PathBuf>, HashMap<String, PathBuf>, Vec<OsString>) =
+    let (paths, named_drvs, log_lines): (Vec<PathBuf>, HashMap<String, StorePath>, Vec<OsString>) =
         stderr_results.into_iter().fold(
             (vec![], HashMap::new(), vec![]),
             |(mut paths, mut named_drvs, mut log_lines), result| {
@@ -63,7 +63,7 @@ fn instrumented_build(root_nix_file: &NixFile, cas: &ContentAddressable) -> Resu
                         paths.push(src);
                     }
                     LogDatum::AttrDrv(name, drv) => {
-                        named_drvs.insert(name, drv);
+                        named_drvs.insert(name, StorePath(drv));
                     }
                     LogDatum::Text(line) => log_lines.push(line),
                 };
@@ -148,11 +148,12 @@ pub struct Info {
     // are those actual drv files?
     /// All the attributes in the default expression which belong to
     /// attributes.
-    pub named_drvs: HashMap<String, PathBuf>,
+    pub named_drvs: HashMap<String, StorePath>,
 
     /// A list of the evaluation's result derivations
-    pub drvs: Vec<PathBuf>,
+    pub drvs: Vec<StorePath>,
 
+    // TODO: rename to `sources` (it’s the input sources we have to watch)
     /// A list of paths examined during the evaluation
     pub paths: Vec<PathBuf>,
 
