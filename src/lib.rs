@@ -42,7 +42,6 @@ pub mod nix;
 pub mod ops;
 pub mod pathreduction;
 pub mod project;
-pub mod roots;
 pub mod socket;
 pub mod watch;
 
