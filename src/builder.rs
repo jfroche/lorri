@@ -13,12 +13,13 @@ use std::any::Any;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use {NixFile, StorePath};
+use {DrvFile, NixFile, StorePath};
 
+// TODO: when moving to CallOpts, you have to change the names of the roots CallOpts generates!
 fn instrumented_build(
     root_nix_file: &NixFile,
     cas: &ContentAddressable,
-) -> Result<Info<StorePath>, Error> {
+) -> Result<Info<DrvFile>, Error> {
     // We're looking for log lines matching:
     //
     //     copied source '...' -> '/nix/store/...'
@@ -60,7 +61,7 @@ fn instrumented_build(
     let (paths, output_paths, log_lines): (
         Vec<PathBuf>,
         // `None` if the field was not seen before, `Some` if it was
-        OutputPaths<Option<StorePath>>,
+        OutputPaths<Option<DrvFile>>,
         Vec<OsString>
     ) =
     stderr_results.into_iter().fold(
@@ -73,9 +74,9 @@ fn instrumented_build(
                     LogDatum::ShellDrv(drv) => {
                         // check whether we have seen this field before
                         match output_paths.shell {
-                            None => { output_paths.shell = Some(StorePath(drv)); }
+                            None => { output_paths.shell = Some(DrvFile(drv)); }
                             // programming error
-                            Some(StorePath(old)) => panic!(
+                            Some(DrvFile(old)) => panic!(
                                 "`lorri read` got attribute `{}` a second time, first path was {:?} and second {:?}",
                                 "shell", old, drv)
                         }
@@ -83,9 +84,9 @@ fn instrumented_build(
                     LogDatum::ShellGcRootDrv(drv) => {
                         // check whether we have seen this field before
                         match output_paths.shell_gc_root {
-                            None => { output_paths.shell_gc_root = Some(StorePath(drv)); }
+                            None => { output_paths.shell_gc_root = Some(DrvFile(drv)); }
                             // programming error
-                            Some(StorePath(old)) => panic!(
+                            Some(DrvFile(old)) => panic!(
                                 "`lorri read` got attribute `{}` a second time, first path was {:?} and second {:?}",
                                 "shell_gc_root", old, drv)
                         }
@@ -130,7 +131,7 @@ fn instrumented_build(
 ///
 /// Instruments the nix file to gain extra information,
 /// which is valuable even if the build fails.
-pub fn run(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info<StorePath>, Error> {
+pub fn run(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info<DrvFile>, Error> {
     instrumented_build(root_nix_file, cas)
 }
 
@@ -221,16 +222,43 @@ pub struct OutputPaths<T> {
     pub shell_gc_root: T,
 }
 
+/// Return the name of each `OutputPaths` attribute.
+pub fn output_path_attr_names() -> OutputPaths<String> {
+    OutputPaths {
+        shell: String::from("shell"),
+        shell_gc_root: String::from("shell_gc_root"),
+    }
+}
+
 impl<T> OutputPaths<T> {
-    /// Similar to other `map` functions, but also provides the name of the field
-    pub fn map_with_attr_name<U, F, E>(self, f: F) -> Result<OutputPaths<U>, E>
+    /// `map` for `OutputPaths`.
+    pub fn map<F, U>(self, f: F) -> OutputPaths<U>
     where
-        F: Fn(&str, T) -> Result<U, E>,
+        F: Fn(T) -> U,
+    {
+        OutputPaths {
+            shell: f(self.shell),
+            shell_gc_root: f(self.shell_gc_root),
+        }
+    }
+
+    /// Like `map`, but return the first `Err`.
+    pub fn map_res<F, U, E>(self, f: F) -> Result<OutputPaths<U>, E>
+    where
+        F: Fn(T) -> Result<U, E>,
     {
         Ok(OutputPaths {
-            shell: f("shell", self.shell)?,
-            shell_gc_root: f("shell_gc_root", self.shell_gc_root)?,
+            shell: f(self.shell)?,
+            shell_gc_root: f(self.shell_gc_root)?,
         })
+    }
+
+    /// `zip` for `OutputPaths`
+    pub fn zip<U>(self, us: OutputPaths<U>) -> OutputPaths<(T, U)> {
+        OutputPaths {
+            shell: (self.shell, us.shell),
+            shell_gc_root: (self.shell_gc_root, us.shell_gc_root),
+        }
     }
 }
 

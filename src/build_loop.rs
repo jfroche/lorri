@@ -107,23 +107,36 @@ impl<'a> BuildLoop<'a> {
 
         debug!("named drvs: {:#?}", build.output_paths);
 
+        // TODO: once build returns realized drvs, make those into roots
         // create root for every field in OutputPaths
-        let output_paths = build
-            .output_paths
-            .map_with_attr_name(|attr_name, store_path| {
-                roots.add(&format!("attr-{}", attr_name), &store_path)
-            })?;
+        // let output_paths = roots.create_roots(build.output_paths)?;
+        let root_gc = roots.add(
+            // TODO: bad, this magic name is not known here (only in roots)
+            "attr-shell_gc_root",
+            &build
+                .drvs
+                .get(0)
+                .expect("logged-evaluation.nix didn’t return a drv!"),
+        )?;
+        let root_shell = roots.add(
+            // TODO: bad, this magic name is not known here (only in roots)
+            "attr-shell",
+            // TODO: add actual root (this is just the same as the shell_root
+            &build
+                .drvs
+                .get(0)
+                .expect("logged-evaluation.nix didn’t return a drv!"),
+        )?;
 
-        let mut event = BuildResults {
+        let output_paths = builder::OutputPaths {
+            shell_gc_root: root_gc,
+            shell: root_shell,
+        };
+
+        let event = BuildResults {
             drvs: HashMap::new(),
             output_paths,
         };
-
-        for (i, drv) in build.drvs.iter().enumerate() {
-            event
-                .drvs
-                .insert(i, roots.add(&format!("build-{}", i), drv)?);
-        }
 
         // add all new (reduced) nix sources to the input source watchlist
         self.watch.extend(&paths.into_iter().collect::<Vec<_>>())?;

@@ -1,13 +1,16 @@
-//! TODO
+//! Handling of nix GC roots
+//!
+//! TODO: inline this module into `::project`
 use crate::project::Project;
+use builder::OutputPaths;
 use std::env;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 /// Roots manipulation
 #[derive(Clone)]
 pub struct Roots {
-    root_dir: PathBuf,
+    /// The GC root directory in the lorri user cache dir
+    gc_root_path: PathBuf,
     id: String,
 }
 
@@ -19,6 +22,27 @@ impl RootPath {
     /// Underlying `&OsStr`.
     pub fn as_os_str(&self) -> &std::ffi::OsStr {
         self.0.as_os_str()
+    }
+}
+
+impl OutputPaths<RootPath> {
+    /// Check whether all all GC roots exist.
+    pub fn all_exist(&self) -> bool {
+        let ex = |rpath: &RootPath| rpath.0.exists();
+        match self {
+            ::builder::OutputPaths {
+                shell,
+                shell_gc_root,
+            } => ex(shell) && ex(shell_gc_root),
+        }
+    }
+
+    /// Check that the shell_gc_root is a directory.
+    pub fn shell_gc_root_is_dir(&self) -> bool {
+        match self.shell_gc_root.0.metadata() {
+            Err(_) => false,
+            Ok(m) => m.is_dir(),
+        }
     }
 }
 
@@ -35,25 +59,52 @@ impl Roots {
     /// and ID.
     pub fn from_project(project: &Project) -> Roots {
         Roots {
-            root_dir: project.gc_root_path.to_path_buf(),
+            gc_root_path: project.gc_root_path.to_path_buf(),
             id: project.hash().to_string(),
         }
+    }
+
+    fn attr_name(attr: String) -> String {
+        format!("attr-{}", attr)
+    }
+
+    /// Return the filesystem paths for these roots.
+    pub fn paths(&self) -> OutputPaths<RootPath> {
+        ::builder::output_path_attr_names()
+            .map(|attr| RootPath(self.gc_root_path.join(&Self::attr_name(attr))))
+    }
+
+    /// Create roots to store paths.
+    pub fn create_roots(
+        &self,
+        // Important: this intentionally only allows creating
+        // roots to `StorePath`, not to `DrvFile`, because we have
+        // no use case for creating GC roots for drv files.
+        paths: OutputPaths<::StorePath>,
+    ) -> Result<OutputPaths<RootPath>, AddRootError>
+where {
+        ::builder::output_path_attr_names()
+            .zip(paths)
+            .map_res(|(name, path)| self.add(&Self::attr_name(name), &path))
     }
 
     // TODO: rename to create_root()
     /// Store a new root under name
     pub fn add(&self, name: &str, store_path: &::StorePath) -> Result<RootPath, AddRootError> {
-        let mut path = self.root_dir.clone();
+        // final path in the `self.gc_root_path` directory
+        let mut path = self.gc_root_path.clone();
         path.push(name);
 
-        debug!("Adding root from {:?} to {:?}", store_path, path,);
+        debug!("Adding root from {:?} to {:?}", store_path.as_path(), path,);
         std::fs::remove_file(&path).or_else(|e| AddRootError::remove(e, &path))?;
 
         std::fs::remove_file(&path).or_else(|e| AddRootError::remove(e, &path))?;
 
-        symlink(store_path.as_path(), &path)
+        // the forward GC root that points from the store path to our cache gc_roots dir
+        std::os::unix::fs::symlink(store_path.as_path(), &path)
             .map_err(|e| AddRootError::symlink(e, store_path.as_path(), &path))?;
 
+        // the reverse GC root that points from nix to our cache gc_roots dir
         let mut root = if let Ok(path) = env::var("NIX_STATE_DIR") {
             PathBuf::from(path)
         } else {
@@ -62,7 +113,7 @@ impl Roots {
         root.push("gcroots");
         root.push("per-user");
 
-        // TODO: check on start
+        // TODO: check on start of lorri
         root.push(env::var("USER").expect("env var 'USER' must be set"));
 
         // The user directory sometimes doesn’t exist,
@@ -76,8 +127,10 @@ impl Roots {
         debug!("Connecting root from {:?} to {:?}", path, root,);
         std::fs::remove_file(&root).or_else(|e| AddRootError::remove(e, &root))?;
 
-        symlink(&path, &root).map_err(|e| AddRootError::symlink(e, &path, &root))?;
+        std::os::unix::fs::symlink(&path, &root)
+            .map_err(|e| AddRootError::symlink(e, &path, &root))?;
 
+        // TODO: don’t return the RootPath here
         Ok(RootPath(path))
     }
 }
