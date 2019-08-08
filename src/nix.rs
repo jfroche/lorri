@@ -39,33 +39,35 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use vec1::Vec1;
 
 use StorePath;
 
 /// Execute Nix commands using a builder-pattern abstraction.
 #[derive(Clone)]
-pub struct CallOpts {
-    input: Input,
+pub struct CallOpts<'a> {
+    input: Input<'a>,
     attribute: Option<String>,
+    result_gc_root_path: Option<PathBuf>,
     argstrs: HashMap<String, String>,
 }
 
 /// Which input to give nix.
 #[derive(Clone)]
-enum Input {
+enum Input<'a> {
     /// A nix expression string.
-    Expression(String),
+    Expression(&'a str),
     /// A nix file.
-    File(PathBuf),
+    File(&'a Path),
 }
 
 /// Opaque type to keep a temporary GC root directory alive.
 /// Once it is dropped, the GC root is removed.
+#[derive(Debug)]
 pub struct GcRootTempDir(tempfile::TempDir);
 
-impl CallOpts {
+impl<'a> CallOpts<'a> {
     /// Create a CallOpts with the Nix expression `expr`.
     ///
     /// ```rust
@@ -79,17 +81,19 @@ impl CallOpts {
     /// ```
     pub fn expression(expr: &str) -> CallOpts {
         CallOpts {
-            input: Input::Expression(expr.to_string()),
+            input: Input::Expression(expr),
             attribute: None,
+            result_gc_root_path: None,
             argstrs: HashMap::new(),
         }
     }
 
     /// Create a CallOpts with the Nix file `nix_file`.
-    pub fn file(nix_file: PathBuf) -> CallOpts {
+    pub fn file(nix_file: &Path) -> CallOpts {
         CallOpts {
             input: Input::File(nix_file),
             attribute: None,
+            result_gc_root_path: None,
             argstrs: HashMap::new(),
         }
     }
@@ -136,6 +140,16 @@ impl CallOpts {
     /// ```
     pub fn argstr(&mut self, name: &str, value: &str) -> &mut Self {
         self.argstrs.insert(name.to_string(), value.to_string());
+        self
+    }
+
+    // TODO: not used at the moment, remove?
+    /// Specify the path of a gc root that should be created
+    /// (think: the `default/` directory `nix-build` creates by default).
+    ///
+    /// The parent directories don’t have to exist, nix will create them.
+    pub fn result_gc_root_path(&mut self, path: PathBuf) -> &mut Self {
+        self.result_gc_root_path = Some(path);
         self
     }
 
@@ -294,7 +308,10 @@ impl CallOpts {
 
         cmd.args(self.command_arguments());
 
-        cmd.stderr(Stdio::inherit());
+        // TODO: regression: should be printed to stdout as well
+        // Same as with the instantiation in builder.rs
+        // cmd.stderr(Stdio::inherit());
+        debug!("{:?}", cmd);
         let output = cmd.output()?;
 
         if output.status.success() {
@@ -329,7 +346,7 @@ impl CallOpts {
         match self.input {
             Input::Expression(ref exp) => {
                 ret.push(OsStr::new("--expr"));
-                ret.push(OsStr::new(exp.as_str()));
+                ret.push(OsStr::new(exp));
             }
             Input::File(ref fp) => {
                 ret.push(OsStr::new("--"));
@@ -409,10 +426,6 @@ pub enum BuildError {
 
     /// Build produced no paths
     NoResult,
-
-    /// The directory passed for the GC root either does not exist or
-    /// is not a directory.
-    GcRootNotADirectory,
 }
 
 impl From<std::io::Error> for BuildError {
@@ -455,7 +468,7 @@ impl From<BuildError> for OnePathError {
 mod tests {
     use super::CallOpts;
     use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     #[test]
     fn cmd_arguments_expression() {
@@ -480,7 +493,7 @@ mod tests {
 
     #[test]
     fn cmd_arguments_test() {
-        let mut nix2 = CallOpts::file(PathBuf::from("/my-cool-file.nix"));
+        let mut nix2 = CallOpts::file(Path::new("/my-cool-file.nix"));
         nix2.attribute("hello");
         nix2.argstr("foo", "bar");
         let exp2: Vec<&OsStr> = [

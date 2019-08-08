@@ -8,6 +8,7 @@ use crate::project::roots;
 use crate::project::roots::Roots;
 use crate::project::Project;
 use crate::watch::Watch;
+use crate::StorePath;
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
@@ -82,9 +83,7 @@ impl<'a> BuildLoop<'a> {
                     tx.send(Event::Failure(failure))
                         .expect("Failed to notify the results of a failed evaluation");
                 }
-                otherwise => {
-                    otherwise.unwrap();
-                }
+                Err(BuildError::Unrecoverable(err)) => panic!("Unrecoverable error!\n{:#?}", err),
             }
 
             self.watch.wait_for_change().expect("Waiter exited");
@@ -97,6 +96,16 @@ impl<'a> BuildLoop<'a> {
     /// the evaluation.
     pub fn once(&mut self) -> Result<BuildResults, BuildError> {
         let build = builder::run(&self.project.nix_file, &self.project.cas)?;
+
+        match build {
+            builder::Info::Failure(f) => Err(BuildError::Recoverable(BuildExitFailure {
+                log_lines: f.log_lines,
+            })),
+            builder::Info::Success(s) => self.once_(s),
+        }
+    }
+
+    fn once_(&mut self, build: builder::Success<StorePath>) -> Result<BuildResults, BuildError> {
         let roots = Roots::from_project(&self.project);
 
         let paths = build.paths;
@@ -110,11 +119,11 @@ impl<'a> BuildLoop<'a> {
         // TODO: once build returns realized drvs, make those into roots
         // create root for every field in OutputPaths
         // let output_paths = roots.create_roots(build.output_paths)?;
+        let (store_paths, gc_root) = build.drvs;
         let root_gc = roots.add(
             // TODO: bad, this magic name is not known here (only in roots)
             "attr-shell_gc_root",
-            &build
-                .drvs
+            store_paths
                 .get(0)
                 .expect("logged-evaluation.nix didn’t return a drv!"),
         )?;
@@ -122,11 +131,12 @@ impl<'a> BuildLoop<'a> {
             // TODO: bad, this magic name is not known here (only in roots)
             "attr-shell",
             // TODO: add actual root (this is just the same as the shell_root
-            &build
-                .drvs
+            store_paths
                 .get(0)
                 .expect("logged-evaluation.nix didn’t return a drv!"),
         )?;
+        // now we can drop the temporary gc_root because we added static roots
+        drop(gc_root);
 
         let output_paths = builder::OutputPaths {
             shell_gc_root: root_gc,
@@ -141,13 +151,7 @@ impl<'a> BuildLoop<'a> {
         // add all new (reduced) nix sources to the input source watchlist
         self.watch.extend(&paths.into_iter().collect::<Vec<_>>())?;
 
-        if build.exec_result.success() {
-            Ok(event)
-        } else {
-            Err(BuildError::Recoverable(BuildExitFailure {
-                log_lines: build.log_lines,
-            }))
-        }
+        Ok(event)
     }
 }
 

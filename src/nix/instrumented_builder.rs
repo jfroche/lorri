@@ -13,13 +13,13 @@ use std::any::Any;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use vec1::Vec1;
 use {DrvFile, NixFile, StorePath};
 
-// TODO: when moving to CallOpts, you have to change the names of the roots CallOpts generates!
-fn instrumented_build(
+fn instrumented_instantiation(
     root_nix_file: &NixFile,
     cas: &ContentAddressable,
-) -> Result<Info<DrvFile>, Error> {
+) -> Result<Info<OutputPaths<DrvFile>>, Error> {
     // We're looking for log lines matching:
     //
     //     copied source '...' -> '/nix/store/...'
@@ -28,19 +28,29 @@ fn instrumented_build(
     // to determine which files we should setup watches on.
     // Increasing verbosity by two levels via `-vv` satisfies that.
 
-    let mut cmd = Command::new("nix-build");
+    let mut cmd = Command::new("nix-instantiate");
 
     let logged_evaluation_nix = cas.file_from_string(include_str!("./logged-evaluation.nix"))?;
 
+    // TODO: see ::nix::CallOpts::paths for the problem with this
+    let gc_root_dir = tempfile::TempDir::new()?;
+
     cmd.args(&[
+        // verbose mode prints the files we track
         OsStr::new("-vv"),
-        OsStr::new("--no-out-link"),
+        // we add a temporary indirect GC root
+        OsStr::new("--add-root"),
+        gc_root_dir.path().join("result").as_os_str(),
+        OsStr::new("--indirect"),
         OsStr::new("--argstr"),
+        // runtime nix paths to needed dependencies that come with lorri
         OsStr::new("runTimeClosure"),
         OsStr::new(crate::RUN_TIME_CLOSURE),
+        // the source file
         OsStr::new("--argstr"),
         OsStr::new("src"),
         root_nix_file.as_os_str(),
+        // instrumented by `./logged-evaluation.nix`
         OsStr::new("--"),
         &logged_evaluation_nix.as_os_str(),
     ])
@@ -55,7 +65,14 @@ fn instrumented_build(
     let stderr_results =
         ::nix::parse_nix_output(&output.stderr, |line| parse_evaluation_line(line));
 
-    let produced_drvs = ::nix::parse_nix_output(&output.stdout, StorePath::from);
+    let produced_drvs = Vec1::from_vec(::nix::parse_nix_output(&output.stdout, StorePath::from))
+        // programming error
+        .unwrap_or_else(|_| {
+            panic!(
+                "`lorri read` didn’t get a store path in its output:\n{:#?}",
+                stderr_results.clone()
+            )
+        });
 
     // iterate over all lines, parsing out the ones we are interested in
     let (paths, output_paths, log_lines): (
@@ -98,6 +115,13 @@ fn instrumented_build(
             },
         );
 
+    if !output.status.success() {
+        return Ok(Info::Failure(Failure {
+            exec_result: output.status,
+            log_lines,
+        }));
+    }
+
     // check whether we got all required `OutputPaths`
     let output_paths = match output_paths {
         // programming error
@@ -118,24 +142,40 @@ fn instrumented_build(
         },
     };
 
-    Ok(Info {
-        exec_result: output.status,
-        drvs: produced_drvs,
+    Ok(Info::Success(Success {
+        drvs: (produced_drvs, ::nix::GcRootTempDir(gc_root_dir)),
         output_paths,
         paths,
-        log_lines,
-    })
+    }))
 }
 
 /// Builds the Nix expression in `root_nix_file`.
 ///
 /// Instruments the nix file to gain extra information,
 /// which is valuable even if the build fails.
-pub fn run(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info<DrvFile>, Error> {
-    instrumented_build(root_nix_file, cas)
+pub fn run(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info<StorePath>, Error> {
+    let inst_info = instrumented_instantiation(root_nix_file, cas)?;
+    match inst_info {
+        Info::Success(s) => {
+            let drvs = s.output_paths.clone();
+            // TODO: we are only using shell_gc_root here, I don’t think
+            // we are using the shell anywhere anymore. Then we could remove
+            // it from OutputPaths and simplify logged-evaluation.nix!
+            let realized = ::nix::CallOpts::file(drvs.shell_gc_root.as_path()).path()?;
+            match s {
+                Success { paths, .. } => Ok(Info::Success(Success {
+                    // TODO: duplication, remove drvs in favour of output_paths
+                    drvs: (vec1::vec1![realized.0.clone()], realized.1),
+                    output_paths: realized.0,
+                    paths,
+                })),
+            }
+        }
+        Info::Failure(f) => Ok(Info::Failure(f)),
+    }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum LogDatum {
     Source(PathBuf),
     ShellDrv(PathBuf),
@@ -189,25 +229,39 @@ fn parse_evaluation_line(line: &OsStr) -> LogDatum {
     }
 }
 
-/// The results of an individual build.
+/// The results of an individual instantiation/build.
 /// Even if the exit code is not 0, there is still
 /// valuable information in the output, like new paths
 /// to watch.
 #[derive(Debug)]
-pub struct Info<T> {
-    /// The result of executing Nix
-    pub exec_result: std::process::ExitStatus,
+pub enum Info<T> {
+    /// Nix ran successfully.
+    Success(Success<T>),
+    /// Nix returned a failing status code.
+    Failure(Failure),
+}
 
+/// A successful Nix run.
+#[derive(Debug)]
+pub struct Success<T> {
     /// See `OutputPaths`
-    pub output_paths: OutputPaths<T>,
+    // TODO: move back to `OutputPaths<T>`
+    pub output_paths: T,
 
     // TODO: this is redundant with shell_gc_root
     /// A list of the evaluation's result derivations
-    pub drvs: Vec<StorePath>,
+    pub drvs: (Vec1<StorePath>, ::nix::GcRootTempDir),
 
     // TODO: rename to `sources` (it’s the input sources we have to watch)
     /// A list of paths examined during the evaluation
     pub paths: Vec<PathBuf>,
+}
+
+/// A failing Nix run.
+#[derive(Debug)]
+pub struct Failure {
+    /// The error status code
+    exec_result: std::process::ExitStatus,
 
     /// A list of stderr log lines
     pub log_lines: Vec<OsString>,
@@ -265,15 +319,23 @@ impl<T> OutputPaths<T> {
 /// Possible errors from an individual evaluation
 #[derive(Debug)]
 pub enum Error {
-    /// IO error executing nix-instantiate
-    Io(std::io::Error),
+    /// Executing nix-instantiate failed
+    Instantiate(std::io::Error),
+
+    /// Executing nix-build failed
+    Build(::nix::OnePathError),
 
     /// Failed to spawn a log processing thread
     ThreadFailure(std::boxed::Box<(dyn std::any::Any + std::marker::Send + 'static)>),
 }
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {
-        Error::Io(e)
+        Error::Instantiate(e)
+    }
+}
+impl From<::nix::OnePathError> for Error {
+    fn from(e: ::nix::OnePathError) -> Error {
+        Error::Build(e)
     }
 }
 impl From<Box<dyn Any + Send + 'static>> for Error {
@@ -326,5 +388,10 @@ mod tests {
                 "downloading 'https://static.rust-lang.org/dist/channel-rust-stable.toml'..."
             ))
         );
+    }
+
+    #[test]
+    fn transitive_source_file_detection() -> std::io::Result<()> {
+        Ok(())
     }
 }
