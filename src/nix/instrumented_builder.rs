@@ -205,8 +205,9 @@ fn parse_evaluation_line(line: &OsStr) -> LogDatum {
             Regex::new("^copied source '(?P<source>.*)' -> '(?:.*)'$").expect("invalid regex!");
         static ref LORRI_READ: Regex =
             Regex::new("^trace: lorri read: '(?P<source>.*)'$").expect("invalid regex!");
+        // we put a (/.*) before the store path to allow for non-standard store locations
         static ref LORRI_ATTR_DRV: Regex =
-            Regex::new("^trace: lorri attribute: '(?P<attribute>.*)' -> '(?P<drv>/nix/store/.*)'$")
+            Regex::new("^trace: lorri attribute: '(?P<attribute>.*)' -> '(?P<drv>(/.*)?/nix/store/.*)'$")
                 .expect("invalid regex!");
     }
 
@@ -391,6 +392,13 @@ mod tests {
             parse_evaluation_line(&OsString::from("trace: lorri attribute: 'shell_gc_root' -> '/nix/store/q3ngidzvincycjjvlilf1z6vj1w4wnas-lorri-keep-env-hack-foo.drv'")),
             LogDatum::ShellGcRootDrv(PathBuf::from("/nix/store/q3ngidzvincycjjvlilf1z6vj1w4wnas-lorri-keep-env-hack-foo.drv"))
         );
+
+        // This tests whether the attribute parsing still works
+        // for non-standard store locations with prefixes (e.g. CI)
+        assert_eq!(
+        parse_evaluation_line(&OsString::from("trace: lorri attribute: 'shell_gc_root' -> '/build/local-store/nix/store/q3ngidzvincycjjvlilf1z6vj1w4wnas-lorri-keep-env-hack-foo.drv'")),
+        LogDatum::ShellGcRootDrv(PathBuf::from("/build/local-store/nix/store/q3ngidzvincycjjvlilf1z6vj1w4wnas-lorri-keep-env-hack-foo.drv"))
+    );
 
         assert_eq!(
             parse_evaluation_line(&OsString::from(
