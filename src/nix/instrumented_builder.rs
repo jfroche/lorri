@@ -81,7 +81,7 @@ fn instrumented_instantiation(
         OutputPaths<Option<DrvFile>>,
         Vec<OsString>
     ) =
-    stderr_results.into_iter().fold(
+    stderr_results.clone().into_iter().fold(
         (vec![], OutputPaths { shell: None, shell_gc_root: None }, vec![]),
         |(mut paths, mut output_paths, mut log_lines), result| {
                 match result {
@@ -125,14 +125,18 @@ fn instrumented_instantiation(
     // check whether we got all required `OutputPaths`
     let output_paths = match output_paths {
         // programming error
-        OutputPaths { shell: None, .. } => {
-            panic!("`lorri read` never got required attribute `shell`")
-        }
+        OutputPaths { shell: None, .. } => panic!(
+            "`lorri read` never got required attribute `shell:\n{:#?}`",
+            stderr_results
+        ),
         // programming error
         OutputPaths {
             shell_gc_root: None,
             ..
-        } => panic!("`lorri read` never got required attribute `shell_gc_root`"),
+        } => panic!(
+            "`lorri read` never got required attribute `shell_gc_root`\n{:#?}",
+            stderr_results
+        ),
         OutputPaths {
             shell: Some(shell),
             shell_gc_root: Some(shell_gc_root),
