@@ -109,6 +109,7 @@ fn instrumented_instantiation(
                         }
                     },
                     LogDatum::Text(line) => log_lines.push(line),
+                    LogDatum::NonUtf(line) => log_lines.push(line),
                 };
 
                 (paths, output_paths, log_lines)
@@ -179,12 +180,19 @@ pub fn run(root_nix_file: &NixFile, cas: &ContentAddressable) -> Result<Info<Sto
     }
 }
 
+/// Classifies the output of nix-instantiate -vv.
 #[derive(Debug, PartialEq, Clone)]
 enum LogDatum {
+    /// Nix source file (which should be tracked)
     Source(PathBuf),
+    /// The shell derivation printed by logged-evaluation.nix
     ShellDrv(PathBuf),
+    /// The shell gc root derivation printed by logged-evaluation.nix
     ShellGcRootDrv(PathBuf),
+    /// Arbitrary text (which we couldn’t otherwise classify)
     Text(OsString),
+    /// Text which we coudn’t decode from UTF-8
+    NonUtf(OsString),
 }
 
 /// Examine a line of output and extract interesting log items in to
@@ -205,7 +213,7 @@ fn parse_evaluation_line(line: &OsStr) -> LogDatum {
     match line.to_str() {
         // If we can’t decode the output line to an UTF-8 string,
         // we cannot match against regexes, so just pass it through.
-        None => LogDatum::Text(line.to_owned()),
+        None => LogDatum::NonUtf(line.to_owned()),
         Some(linestr) => {
             // Lines about evaluating a file are much more common, so looking
             // for them first will reduce comparisons.
