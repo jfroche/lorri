@@ -2,7 +2,7 @@
 //!
 //! TODO: inline this module into `::project`
 use crate::project::Project;
-use builder::OutputPaths;
+use nix::instrumented_builder::OutputPaths;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,7 @@ impl OutputPaths<RootPath> {
     pub fn all_exist(&self) -> bool {
         let ex = |rpath: &RootPath| rpath.0.exists();
         match self {
-            ::builder::OutputPaths {
+            OutputPaths {
                 shell,
                 shell_gc_root,
             } => ex(shell) && ex(shell_gc_root),
@@ -70,7 +70,7 @@ impl Roots {
 
     /// Return the filesystem paths for these roots.
     pub fn paths(&self) -> OutputPaths<RootPath> {
-        ::builder::output_path_attr_names()
+        ::nix::instrumented_builder::output_path_attr_names()
             .map(|attr| RootPath(self.gc_root_path.join(&Self::attr_name(attr))))
     }
 
@@ -83,7 +83,7 @@ impl Roots {
         paths: OutputPaths<::StorePath>,
     ) -> Result<OutputPaths<RootPath>, AddRootError>
 where {
-        ::builder::output_path_attr_names()
+        ::nix::instrumented_builder::output_path_attr_names()
             .zip(paths)
             .map_res(|(name, path)| self.add(&Self::attr_name(name), &path))
     }

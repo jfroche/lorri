@@ -1,7 +1,7 @@
-//! Uses `builder` and filesystem watch code to repeatedly
-//! evaluate and build a given Nix file.
+//! Uses `instrumented_builder` and filesystem watch
+//! to repeatedly evaluate and build a given Nix file.
 
-use crate::builder;
+use crate::nix::instrumented_builder as builder;
 use crate::notify;
 use crate::pathreduction::reduce_paths;
 use crate::project::roots;

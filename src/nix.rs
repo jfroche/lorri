@@ -32,6 +32,8 @@
 //! }
 //! ```
 
+pub mod instrumented_builder;
+
 use serde_json;
 use std::collections::HashMap;
 use std::ffi::OsStr;
